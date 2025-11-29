@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Customer, Task, TemplateTask } from '../types';
-import { X, Check, Sparkles, Wand2, CopyPlus, Trash2, Info } from 'lucide-react';
+import { X, Check, Sparkles, CopyPlus, Trash2, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import Celebration from './Celebration';
-import { generateTasksForCustomer } from '../services/geminiService';
 
 interface Props {
   customer: Customer | null;
@@ -68,7 +67,6 @@ const TouchableTaskItem: React.FC<TouchableTaskItemProps> = ({ task, onToggle, o
 
 const TaskModal: React.FC<Props> = ({ customer, tasks, setTasks, templateTasks, onClose }) => {
   const [celebrationTaskTitle, setCelebrationTaskTitle] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('営業');
   
   // State for deletion confirmation
@@ -102,24 +100,6 @@ const TaskModal: React.FC<Props> = ({ customer, tasks, setTasks, templateTasks, 
       setCelebrationTaskTitle(title);
       setTimeout(() => setCelebrationTaskTitle(null), 3500);
     }
-  };
-
-  const handleGenerateAI = async () => {
-    setIsGenerating(true);
-    const newTasksData = await generateTasksForCustomer(customer.name, customer.status);
-    
-    const newTasks: Task[] = newTasksData.map((t: any, idx: number) => ({
-        id: `gen_${Date.now()}_${idx}`,
-        customerId: customer.id,
-        category: t.category,
-        title: t.title,
-        isCompleted: false,
-        isMilestone: t.isMilestone
-    }));
-
-    setTasks(prev => [...prev, ...newTasks]);
-    setIsGenerating(false);
-    setToast({ message: 'AIによるタスク生成が完了しました', type: 'success' });
   };
   
   const handleInsertTemplates = () => {
@@ -265,27 +245,13 @@ const TaskModal: React.FC<Props> = ({ customer, tasks, setTasks, templateTasks, 
               {customerTasks.length === 0 && (
                   <div className="flex flex-col items-center justify-center h-40 bg-white rounded-xl border border-dashed border-gray-300 p-6 text-center">
                       <p className="text-gray-500 mb-4">タスクがまだ登録されていません。</p>
-                      <div className="flex space-x-3">
+                      <div className="flex justify-center">
                           <button 
                               onClick={handleInsertTemplates}
                               className="flex items-center space-x-2 bg-white border border-blue-300 text-blue-600 px-4 py-2 rounded-lg hover:bg-blue-50 transition-colors"
                           >
                               <CopyPlus className="w-4 h-4" />
                               <span>ひな形を挿入</span>
-                          </button>
-                          <button 
-                              onClick={handleGenerateAI}
-                              disabled={isGenerating}
-                              className="flex items-center space-x-2 bg-purple-600 text-white px-4 py-2 rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50"
-                          >
-                              {isGenerating ? (
-                                  <span className="animate-pulse">生成中...</span>
-                              ) : (
-                                  <>
-                                      <Wand2 className="w-4 h-4" />
-                                      <span>AIでタスクを生成</span>
-                                  </>
-                              )}
                           </button>
                       </div>
                   </div>
