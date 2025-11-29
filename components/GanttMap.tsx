@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Customer, CustomerStatus, ConstructionPhase } from '../types';
 import { CENTER_LAT, CENTER_LNG, CONSTRUCTION_PHASE_CONFIG } from '../constants';
-import { Calendar, Map as MapIcon, ZoomIn, ZoomOut, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Calendar, Map as MapIcon, ZoomIn, ZoomOut, PanelRightClose, PanelRightOpen, GripVertical } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 // Since Leaflet is loaded from a script tag, we declare it globally
@@ -13,11 +13,11 @@ interface Props {
   customers: Customer[];
 }
 
-const ZOOM_LEVELS = [2, 4, 8, 16, 32]; // px per day. Corresponds to 2Y, 1Y, 6M, 3M, 1M views.
-const ZOOM_LABELS = ['2年', '1年', '6ヶ月', '3ヶ月', '1ヶ月'];
 const ROW_HEIGHT = 25; // px
 const HEADER_HEIGHT = 48; // px
 const NAME_WIDTH = 160; // px
+const MIN_DAY_WIDTH = 0.5; // Minimum px per day
+const MAX_DAY_WIDTH = 100; // Maximum px per day
 
 const GanttMap: React.FC<Props> = ({ customers }) => {
   const mapRef = useRef<HTMLDivElement>(null);
@@ -29,22 +29,77 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
   const ganttContainerRef = useRef<HTMLDivElement>(null);
   
   // Drag to Scroll State
-  const [isDragging, setIsDragging] = useState(false);
+  const [isDraggingScroll, setIsDraggingScroll] = useState(false);
   const [startX, setStartX] = useState(0);
   const [startY, setStartY] = useState(0);
   const [scrollLeftPos, setScrollLeftPos] = useState(0);
   const [scrollTopPos, setScrollTopPos] = useState(0);
 
-  const [zoomLevel, setZoomLevel] = useState(1); // Index for ZOOM_LEVELS
-  const DAY_WIDTH = ZOOM_LEVELS[zoomLevel];
+  // Zoom / Scale State
+  const [dayWidth, setDayWidth] = useState(8); // px per day (Initial value similar to previous zoomLevel 2)
+  const [isResizing, setIsResizing] = useState(false);
+  const resizeState = useRef<{ startX: number; startWidth: number; daysFromStart: number } | null>(null);
 
   const handleZoomIn = () => {
-    setZoomLevel(prev => Math.min(prev + 1, ZOOM_LEVELS.length - 1));
+    setDayWidth(prev => Math.min(prev * 1.5, MAX_DAY_WIDTH));
   };
 
   const handleZoomOut = () => {
-    setZoomLevel(prev => Math.max(prev - 1, 0));
+    setDayWidth(prev => Math.max(prev / 1.5, MIN_DAY_WIDTH));
   };
+
+  // --- Resize Handlers ---
+  const handleResizeMouseDown = (e: React.MouseEvent, cumulativeDays: number) => {
+    e.preventDefault();
+    e.stopPropagation(); // Prevent scroll drag
+    setIsResizing(true);
+    resizeState.current = {
+        startX: e.clientX,
+        startWidth: dayWidth,
+        daysFromStart: cumulativeDays
+    };
+    document.body.style.cursor = 'col-resize';
+  };
+
+  useEffect(() => {
+    const handleResizeMove = (e: MouseEvent) => {
+        if (!isResizing || !resizeState.current) return;
+        
+        const { startX, startWidth, daysFromStart } = resizeState.current;
+        const deltaX = e.clientX - startX;
+        
+        // Calculate new total width for this segment
+        const currentPixelWidth = daysFromStart * startWidth;
+        const newPixelWidth = currentPixelWidth + deltaX;
+        
+        // Reverse calculate the new dayWidth
+        // Prevent division by zero or negative width
+        if (daysFromStart > 0) {
+            let newDayWidth = newPixelWidth / daysFromStart;
+            newDayWidth = Math.max(MIN_DAY_WIDTH, Math.min(newDayWidth, MAX_DAY_WIDTH));
+            setDayWidth(newDayWidth);
+        }
+    };
+
+    const handleResizeUp = () => {
+        if (isResizing) {
+            setIsResizing(false);
+            resizeState.current = null;
+            document.body.style.cursor = '';
+        }
+    };
+
+    if (isResizing) {
+        window.addEventListener('mousemove', handleResizeMove);
+        window.addEventListener('mouseup', handleResizeUp);
+    }
+
+    return () => {
+        window.removeEventListener('mousemove', handleResizeMove);
+        window.removeEventListener('mouseup', handleResizeUp);
+    };
+  }, [isResizing]);
+
 
   const { timelineStart, timelineEnd, totalDays, months, todayOffset } = useMemo(() => {
     const today = new Date();
@@ -55,17 +110,23 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
 
     const dayCount = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
 
-    const monthArr: { label: string, offset: number, days: number }[] = [];
+    const monthArr: { label: string, offset: number, days: number, cumulativeDays: number }[] = [];
     let current = new Date(start);
+    let cumulativeDays = 0;
+
     while (current <= end) {
       const year = current.getFullYear();
       const month = current.getMonth();
       const daysInMonth = new Date(year, month + 1, 0).getDate();
       const offset = (current.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
+      
+      cumulativeDays += daysInMonth;
+
       monthArr.push({
         label: `${year} / ${month + 1}`,
         offset: offset,
-        days: daysInMonth
+        days: daysInMonth,
+        cumulativeDays: offset + daysInMonth // End of this month relative to start
       });
       current.setMonth(month + 1);
     }
@@ -91,36 +152,36 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
         return { dayOfWeek: date.getDay(), dayOfMonth: date.getDate() };
     };
 
-    switch (zoomLevel) {
-        case 4: // '1ヶ月' (Month) -> Daily lines
-            for (let i = 0; i < totalDays; i++) {
-                lines.push({ offset: i, isStrong: getDateInfo(i).dayOfWeek === 0 }); // Strong for Sundays
+    // Dynamic grid density based on dayWidth
+    if (dayWidth >= 15) {
+        // Daily lines
+        for (let i = 0; i < totalDays; i++) {
+            lines.push({ offset: i, isStrong: getDateInfo(i).dayOfWeek === 0 });
+        }
+    } else if (dayWidth >= 4) {
+        // Weekly lines
+        for (let i = 0; i < totalDays; i++) {
+            if (getDateInfo(i).dayOfWeek === 0) { // Sundays
+                lines.push({ offset: i, isStrong: false });
             }
-            break;
-        case 3: // '3ヶ月' (3 Months) -> Weekly lines
-            for (let i = 0; i < totalDays; i++) {
-                if (getDateInfo(i).dayOfWeek === 0) { // Sundays
-                    lines.push({ offset: i, isStrong: false });
-                }
+        }
+    } else if (dayWidth >= 1) {
+        // Half-monthly (approx)
+        for (let i = 0; i < totalDays; i++) {
+            const { dayOfMonth } = getDateInfo(i);
+            if (dayOfMonth === 1 || dayOfMonth === 15) {
+                lines.push({ offset: i, isStrong: dayOfMonth === 1 });
             }
-            break;
-        case 2: // '6ヶ月' (6 Months) -> Half-monthly lines
-            for (let i = 0; i < totalDays; i++) {
-                const { dayOfMonth } = getDateInfo(i);
-                if (dayOfMonth === 1 || dayOfMonth === 15) {
-                    lines.push({ offset: i, isStrong: dayOfMonth === 1 });
-                }
-            }
-            break;
-        case 1: // '1年' (1 Year) -> Monthly lines
-        case 0: // '2年' (2 Years) -> Monthly lines
-            months.forEach(month => {
-                lines.push({ offset: month.offset, isStrong: true });
-            });
-            break;
+        }
+    } else {
+        // Monthly lines only
+         months.forEach(month => {
+            lines.push({ offset: month.offset, isStrong: true });
+        });
     }
+
     return lines;
-  }, [zoomLevel, timelineStart, totalDays, months]);
+  }, [dayWidth, timelineStart, totalDays, months]);
 
 
   const projects = useMemo(() => {
@@ -217,10 +278,10 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
   // Drag to Scroll Handlers
   const handleMouseDown = (e: React.MouseEvent) => {
     if (!ganttContainerRef.current) return;
-    // Don't trigger drag if clicking a button or specific interactive element if needed,
-    // but here we generally want to allow dragging from anywhere in the container.
+    // Do not initiate drag scroll if resizing or clicking interactive elements
+    if (isResizing) return;
     
-    setIsDragging(true);
+    setIsDraggingScroll(true);
     setStartX(e.pageX - ganttContainerRef.current.offsetLeft);
     setStartY(e.pageY - ganttContainerRef.current.offsetTop);
     setScrollLeftPos(ganttContainerRef.current.scrollLeft);
@@ -228,15 +289,15 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
   };
 
   const handleMouseLeave = () => {
-    setIsDragging(false);
+    setIsDraggingScroll(false);
   };
 
   const handleMouseUp = () => {
-    setIsDragging(false);
+    setIsDraggingScroll(false);
   };
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    if (!isDragging || !ganttContainerRef.current) return;
+    if (!isDraggingScroll || !ganttContainerRef.current) return;
     e.preventDefault();
     const x = e.pageX - ganttContainerRef.current.offsetLeft;
     const y = e.pageY - ganttContainerRef.current.offsetTop;
@@ -258,16 +319,20 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
             <div className="flex items-center space-x-1 bg-gray-200 p-1 rounded-md ml-4">
               <button
                 onClick={handleZoomOut}
-                disabled={zoomLevel === 0}
+                disabled={dayWidth <= MIN_DAY_WIDTH}
                 className="p-1 rounded text-gray-600 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="縮小"
               >
                 <ZoomOut className="w-4 h-4" />
               </button>
-              <span className="text-xs text-gray-600 font-mono w-12 text-center" title="表示期間">{ZOOM_LABELS[zoomLevel]}</span>
+              {/* Scale Indicator */}
+              <div className="px-2 text-xs text-gray-600 font-mono text-center flex items-center space-x-1" title="現在の縮尺 (1日あたりの幅)">
+                 <span className="w-12 text-right">{dayWidth.toFixed(1)}</span>
+                 <span className="text-[10px] text-gray-400">px/day</span>
+              </div>
               <button
                 onClick={handleZoomIn}
-                disabled={zoomLevel === ZOOM_LEVELS.length - 1}
+                disabled={dayWidth >= MAX_DAY_WIDTH}
                 className="p-1 rounded text-gray-600 hover:bg-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="拡大"
               >
@@ -296,21 +361,21 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
         </div>
 
         <div 
-            className={`flex-1 overflow-auto cursor-grab active:cursor-grabbing ${isDragging ? 'select-none' : ''}`} 
+            className={`flex-1 overflow-auto cursor-grab active:cursor-grabbing ${isDraggingScroll ? 'select-none' : ''}`} 
             ref={ganttContainerRef}
             onMouseDown={handleMouseDown}
             onMouseLeave={handleMouseLeave}
             onMouseUp={handleMouseUp}
             onMouseMove={handleMouseMove}
         >
-          <div className="relative" style={{ width: totalDays * DAY_WIDTH + NAME_WIDTH }}>
+          <div className="relative" style={{ width: totalDays * dayWidth + NAME_WIDTH }}>
             {/* Background Grid Layer */}
             <div className="absolute inset-0 pointer-events-none" style={{ paddingTop: HEADER_HEIGHT, paddingLeft: NAME_WIDTH }}>
                 {GridLines.map((line, i) => (
                     <div 
                         key={`grid-${i}`}
                         className={`absolute top-0 bottom-0 border-l ${line.isStrong ? 'border-slate-200' : 'border-slate-100'}`}
-                        style={{ left: line.offset * DAY_WIDTH }}
+                        style={{ left: line.offset * dayWidth }}
                     />
                 ))}
             </div>
@@ -323,9 +388,20 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
                 </div>
                 {/* Timeline header */}
                 <div className="relative flex-1 h-full">
-                    {months.map(({ label, offset, days }) => (
-                        <div key={label} className="absolute h-full flex items-center justify-center border-l text-xs text-slate-500" style={{ left: offset * DAY_WIDTH, width: days * DAY_WIDTH }}>
-                            {label}
+                    {months.map(({ label, offset, days, cumulativeDays }) => (
+                        <div 
+                            key={label} 
+                            className="absolute h-full flex items-center justify-center border-l text-xs text-slate-500 group select-none" 
+                            style={{ left: offset * dayWidth, width: days * dayWidth }}
+                        >
+                            <span className="truncate px-1">{label}</span>
+                            {/* Resize Handle */}
+                            <div 
+                                className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-blue-400/50 group-hover:bg-gray-300/50 z-50 transition-colors"
+                                onMouseDown={(e) => handleResizeMouseDown(e, cumulativeDays)}
+                            >
+                                <div className="absolute right-0 top-1/2 -translate-y-1/2 h-4 w-[1px] bg-gray-400" />
+                            </div>
                         </div>
                     ))}
                 </div>
@@ -339,7 +415,7 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
                         <div
                             onClick={(e) => {
                                 // Prevent click if we were dragging
-                                if (isDragging) return;
+                                if (isDraggingScroll) return;
                                 if (!isMapVisible) setIsMapVisible(true);
                                 setFlashingCustomerId(customer.id);
                             }}
@@ -354,7 +430,7 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
                             <div 
                               title={`設計・申請期間: ${design.width}日間`}
                               className="absolute h-4 top-1/2 -translate-y-1/2 rounded bg-blue-500 opacity-80 z-10 pointer-events-auto"
-                              style={{ left: design.startOffset * DAY_WIDTH, width: design.width * DAY_WIDTH }}
+                              style={{ left: design.startOffset * dayWidth, width: design.width * dayWidth }}
                             />
                           )}
                           
@@ -364,8 +440,8 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
                               title={`${phase.name}: ${phase.width}日間`}
                               className="absolute h-4 top-1/2 -translate-y-1/2 rounded opacity-90 z-10 pointer-events-auto"
                               style={{
-                                  left: phase.startOffset * DAY_WIDTH,
-                                  width: phase.width * DAY_WIDTH,
+                                  left: phase.startOffset * dayWidth,
+                                  width: phase.width * dayWidth,
                                   backgroundColor: phase.color
                               }}
                             />
@@ -376,7 +452,7 @@ const GanttMap: React.FC<Props> = ({ customers }) => {
             </div>
             
             {/* Today Line Overlay */}
-            <div className="absolute top-0 bottom-0 border-l-2 border-red-400 z-10 pointer-events-none" style={{ left: todayOffset * DAY_WIDTH + NAME_WIDTH }}>
+            <div className="absolute top-0 bottom-0 border-l-2 border-red-400 z-10 pointer-events-none" style={{ left: todayOffset * dayWidth + NAME_WIDTH }}>
               <div className="sticky top-0 -translate-x-1/2 text-[10px] bg-red-400 text-white px-1 rounded z-20" style={{top: HEADER_HEIGHT / 2}}>今日</div>
             </div>
           </div>
